@@ -15,8 +15,40 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
-from django.urls import path
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from rest_framework import permissions
+from drf_yasg.views import get_schema_view
+from drf_yasg import openapi
+from orders.views import ProductViewSet, OrderViewSet, RestaurantViewSet, ClientViewSet, DriverViewSet, ReviewViewSet, DeliveryViewSet
+
+# Crear enrutador DRF
+router = DefaultRouter()
+router.register(r'products', ProductViewSet)
+router.register(r'orders', OrderViewSet)
+router.register(r'restaurants', RestaurantViewSet)
+router.register(r'clients', ClientViewSet)
+router.register(r'drivers', DriverViewSet)
+router.register(r'reviews', ReviewViewSet)
+router.register(r'deliveries', DeliveryViewSet)
+
+schema_view = get_schema_view(
+    openapi.Info(
+        title="RAPPITESO API",
+        default_version='v1',
+        description="API para la aplicación de entrega de comida RAPPITESO",
+        terms_of_service="https://www.google.com/policies/terms/",
+        contact=openapi.Contact(email="admin@lms.com"),
+        license=openapi.License(name="MIT License"),
+    ),
+    public=True,
+    permission_classes=(permissions.AllowAny,),
+)
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('', include('orders.urls')),
+    path('api/', include(router.urls)),
+    path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
+    path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
 ]

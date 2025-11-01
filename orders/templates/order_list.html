@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Order List</title>
+</head>
+<body>
+    <h1>Orders</h1>
+    <ul>
+        {% for order in orders %}
+            <li>Order {{ order.id }} - Total: ${{ order.total }}</li>
+        {% endfor %}
+    </ul>
+</body>
+</html>
