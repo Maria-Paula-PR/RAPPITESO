@@ -12,6 +12,9 @@ services:
       - app-network
 
   web:
+    environment:
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}.apps.googleusercontent.com
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
     build: .
     command: ["python", "manage.py", "runserver", "0.0.0.0:8000"]
     volumes:
