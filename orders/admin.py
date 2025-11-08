@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Product, Order, Restaurant, Client, Driver, Review, Delivery
+from .models import Product, Order, Restaurant, Client, Driver, Review, Delivery, OrderItem
 
 
 @admin.register(Restaurant)
@@ -37,6 +37,13 @@ class OrderAdmin(admin.ModelAdmin):
     list_filter = ['status', 'payment_method', 'creation_date']
     search_fields = ['client__name', 'restaurant__name']
     date_hierarchy = 'creation_date'
+
+
+@admin.register(OrderItem)
+class OrderItemAdmin(admin.ModelAdmin):
+    list_display = ['order', 'product', 'quantity', 'unit_price']
+    list_filter = ['product']
+    search_fields = ['order__id', 'product__name']
 
 
 @admin.register(Review)
