@@ -45,3 +45,5 @@ class DeliverySerializer(serializers.ModelSerializer):
     class Meta:
         model = Delivery
         fields = ['id', 'order', 'driver', 'delivery_date', 'delivery_time', 'delivery_status']
+
+

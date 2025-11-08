@@ -68,6 +68,7 @@ class Order(models.Model):
     delivery_address = models.CharField(max_length=300)
     payment_method = models.CharField(max_length=30, choices=PAYMENT_METHOD_CHOICES)
     comments = models.TextField()
+    products = models.ManyToManyField(Product, through='OrderItem', related_name='orders')
 
     def __str__(self):
         return f"Order {self.id} - {self.client.name}"
@@ -75,6 +76,19 @@ class Order(models.Model):
     class Meta:
         verbose_name = "Order"
         verbose_name_plural = "Orders"
+
+class OrderItem(models.Model):
+    order = models.ForeignKey(Order, related_name='items', on_delete=models.CASCADE)
+    product = models.ForeignKey(Product, on_delete=models.CASCADE)
+    quantity = models.PositiveIntegerField(default=1)
+    unit_price = models.DecimalField(max_digits=8, decimal_places=2)
+
+    def __str__(self):
+        return f"{self.quantity} x {self.product.name} (Order {self.order.id})"
+
+    class Meta:
+        verbose_name = "Order Item"
+        verbose_name_plural = "Order Items"
 
 class Driver(models.Model):
     name = models.CharField(max_length=200)
@@ -126,3 +140,5 @@ class Review(models.Model):
     class Meta:
         verbose_name = "Review"
         verbose_name_plural = "Reviews"
+
+
