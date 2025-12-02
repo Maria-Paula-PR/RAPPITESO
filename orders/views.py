@@ -10,7 +10,7 @@ from django.contrib.auth.models import User
 from django.shortcuts import render, redirect
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
-from .forms import RegistroForm
+from .forms import RegistroForm, CheckoutForm
 from django.utils import timezone
 
 from .models import (
@@ -78,7 +78,40 @@ def iniciar_sesion(request):
 
 @login_required
 def perfil(request):
-    return render(request, 'user/perfil.html')
+    # Inicializar estadísticas
+    total_orders = 0
+    pending_orders = 0
+    total_spent = 0
+    
+    # Buscar clientes por email (asumiendo que el email del usuario es único)
+    client_email = request.user.email
+    
+    # Obtener todos los clientes con este email (puede haber múltiples)
+    clients = Client.objects.filter(email=client_email)
+    
+    if clients.exists():
+        # Si hay múltiples clientes con el mismo email, tomamos el primero
+        # En una implementación real, podrías querer fusionar estos registros
+        client = clients.first()
+        
+        # Obtener todos los pedidos de los clientes con este email
+        orders = Order.objects.filter(client__in=clients)
+        total_orders = orders.count()
+        
+        # Contar pedidos pendientes
+        pending_orders = orders.filter(status__in=['pending', 'in_progress']).count()
+        
+        # Calcular el total gastado
+        total_spent = sum(order.total for order in orders if order.total)
+    
+    context = {
+        'total_orders': total_orders,
+        'pending_orders': pending_orders,
+        'total_spent': total_spent,
+        'client': client if 'client' in locals() else None,
+    }
+    
+    return render(request, 'user/perfil.html', context)
 
 
 def cerrar_sesion(request):
@@ -299,31 +332,116 @@ def checkout(request):
 
     # Choose restaurant from first product
     restaurant = products[0][0].restaurant
-
-    # Get or create Client for this user
-    user = request.user
-    client, _ = Client.objects.get_or_create(
-        name=user.get_full_name() or user.username,
-        defaults={
-            'email': user.email or 'no-email@example.com',
-            'address': '',
-            'phone_number': '',
-        }
-    )
-
-    # Compute total
     total = sum(p.price * qty for p, qty in products)
 
-    order = Order.objects.create(
-        client=client,
-        restaurant=restaurant,
-        status='in_progress',
-        total=total,
-        delivery_date=timezone.now(),
-        delivery_address='No especificada',
-        payment_method='cash',
-        comments='',
-    )
+    if request.method == 'POST':
+        form = CheckoutForm(request.POST)
+        if form.is_valid():
+            # Get or create Client for this user
+            user = request.user
+            client, _ = Client.objects.get_or_create(
+                name=user.get_full_name() or user.username,
+                defaults={
+                    'email': user.email or 'no-email@example.com',
+                    'address': form.cleaned_data['delivery_address'],
+                    'phone_number': '',
+                }
+            )
+            
+            # Update client address if it's different
+            if client.address != form.cleaned_data['delivery_address']:
+                client.address = form.cleaned_data['delivery_address']
+                client.save()
+
+            # Create the order
+            order = Order.objects.create(
+                client=client,
+                restaurant=restaurant,
+                status='pending',
+                total=total,
+                delivery_date=timezone.now(),
+                delivery_address=form.cleaned_data['delivery_address'],
+                payment_method=form.cleaned_data['payment_method'],
+                comments=form.cleaned_data['comments'],
+            )
+            
+            # Create OrderItems
+            for p, qty in products:
+                OrderItem.objects.create(
+                    order=order,
+                    product=p,
+                    quantity=qty,
+                    unit_price=p.price,
+                )
+            
+            # Asignar conductor automáticamente
+            try:
+                # Buscar el conductor con menos entregas pendientes
+                driver = Driver.objects.filter(availability=True)
+                if not driver.exists():
+                    # Si no hay conductores disponibles, buscar cualquier conductor
+                    driver = Driver.objects.first()
+                    if driver is None:
+                        # Si no hay conductores en el sistema, crear uno de emergencia
+                        driver = Driver.objects.create(
+                            name='Conductor de Emergencia',
+                            email='emergencia@example.com',
+                            phone_number='555-0000',
+                            vehicle_type='Moto',
+                            availability=True
+                        )
+                        messages.warning(request, 'Se ha creado un conductor de emergencia para tu pedido.')
+                else:
+                    # Seleccionar el conductor con menos entregas pendientes
+                    driver = min(
+                        driver,
+                        key=lambda d: Delivery.objects.filter(
+                            driver=d, 
+                            delivery_status__in=['pending', 'in_transit']
+                        ).count()
+                    )
+                
+                # Crear la entrega
+                delivery = Delivery.objects.create(
+                    order=order,
+                    driver=driver,
+                    delivery_date=timezone.now(),
+                    delivery_time=timezone.now().time(),
+                    delivery_status='pending',
+                )
+                
+                messages.success(request, f'Pedido #{order.id} creado exitosamente. Conductor asignado: {driver.name}.')
+                
+                # Clear cart
+                request.session['cart'] = {}
+                return redirect('checkout_success', order_id=order.id)
+                
+            except Exception as e:
+                # En caso de error, registrar y notificar
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f'Error asignando conductor al pedido {order.id}: {str(e)}')
+                messages.error(request, 'Hubo un error al procesar tu pedido. Por favor intenta de nuevo.')
+                order.delete()  # Eliminar el pedido si hay un error
+                return redirect('view_cart')
+    else:
+        initial_data = {}
+        if request.user.is_authenticated and hasattr(request.user, 'client'):
+            initial_data['delivery_address'] = request.user.client.address
+            initial_data['payment_method'] = 'cash'
+        form = CheckoutForm(initial=initial_data)
+    
+    # Preparar la lista de productos con sus cantidades
+    product_list = [(p, qty) for p, qty in products]
+    
+    context = {
+        'form': form,
+        'products': [p for p, _ in products],
+        'product_list': product_list,  # Lista de tuplas (producto, cantidad)
+        'total': total,
+        'restaurant': restaurant,
+    }
+    return render(request, 'checkout_form.html', context)
 
     # Create OrderItems
     for p, qty in products:
@@ -334,18 +452,54 @@ def checkout(request):
             unit_price=p.price,
         )
 
-    # Assign available driver and create delivery
-    driver = Driver.objects.filter(availability=True).first()
-    if driver is None:
-        # fallback: create a placeholder driver
-        driver = Driver.objects.create(name='Conductor Asignado', email='driver@example.com', phone_number='', vehicle_type='Moto', availability=True)
-    Delivery.objects.create(
-        order=order,
-        driver=driver,
-        delivery_date=timezone.now(),
-        delivery_time=timezone.now().time(),
-        delivery_status='in_transit',
-    )
+    # Asignar conductor automáticamente
+    try:
+        # Buscar el conductor con menos entregas pendientes
+        driver = Driver.objects.filter(availability=True)
+        if not driver.exists():
+            # Si no hay conductores disponibles, buscar cualquier conductor
+            driver = Driver.objects.first()
+            if driver is None:
+                # Si no hay conductores en el sistema, crear uno de emergencia
+                driver = Driver.objects.create(
+                    name='Conductor de Emergencia',
+                    email='emergencia@example.com',
+                    phone_number='555-0000',
+                    vehicle_type='Moto',
+                    availability=True
+                )
+                messages.warning(request, 'Se ha creado un conductor de emergencia para tu pedido.')
+        else:
+            # Seleccionar el conductor con menos entregas pendientes
+            driver = min(
+                driver,
+                key=lambda d: Delivery.objects.filter(
+                    driver=d, 
+                    delivery_status__in=['pending', 'in_transit']
+                ).count()
+            )
+        
+        # Crear la entrega
+        delivery = Delivery.objects.create(
+            order=order,
+            driver=driver,
+            delivery_date=timezone.now(),
+            delivery_time=timezone.now().time(),
+            delivery_status='pending',  # Cambiado a 'pending' en lugar de 'in_transit'
+        )
+        
+        # Actualizar el estado del pedido
+        order.status = 'in_progress'
+        order.save()
+        
+        messages.success(request, f'Pedido #{order.id} creado exitosamente. Conductor asignado: {driver.name}.')
+        
+    except Exception as e:
+        # En caso de error, registrar y notificar
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f'Error asignando conductor al pedido {order.id}: {str(e)}')
+        messages.error(request, 'Hubo un error al asignar un conductor. Por favor contacta al soporte.')
 
     # Clear cart
     request.session['cart'] = {}
