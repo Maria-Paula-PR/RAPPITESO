@@ -152,6 +152,20 @@ EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD')
 # Configuración opcional pero recomendada
 DEFAULT_FROM_EMAIL = f'RAPPITESO <{os.environ.get("EMAIL_HOST_USER")}>'
 
+# django-allauth configuration
+SITE_ID = 1
+
+# Email verification settings
+ACCOUNT_EMAIL_VERIFICATION = 'mandatory'  # Require email verification before login
+ACCOUNT_EMAIL_REQUIRED = True
+ACCOUNT_AUTHENTICATION_METHOD = 'username_email'  # Allow login with username or email
+ACCOUNT_USERNAME_REQUIRED = True
+ACCOUNT_UNIQUE_EMAIL = True
+
+# Login settings
+LOGIN_REDIRECT_URL = '/'
+ACCOUNT_LOGOUT_REDIRECT_URL = '/'
+
 SOCIALACCOUNT_PROVIDERS = {
     'google': {
         'SCOPE': [

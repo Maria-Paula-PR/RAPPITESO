@@ -10,8 +10,14 @@ from django.contrib.auth.models import User
 from django.shortcuts import render, redirect
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
-from .forms import RegistroForm, CheckoutForm
+from django.core.mail import send_mail, EmailMultiAlternatives
+from django.template.loader import render_to_string
+from django.conf import settings
+from django.utils.crypto import get_random_string
 from django.utils import timezone
+from django.utils.html import strip_tags
+import hashlib
+from .forms import RegistroForm, CheckoutForm
 
 from .models import (
     Product,
@@ -33,6 +39,98 @@ from .serializers import (
     DeliverySerializer,
 )
 
+def _generate_verification_token(user):
+    """Generate a verification token for a user"""
+    # Create a token based on user id, email, and secret key
+    # This allows us to verify the token without storing it
+    token_string = f"{user.id}{user.email}{settings.SECRET_KEY}"
+    token = hashlib.sha256(token_string.encode()).hexdigest()
+    return token
+
+def _verify_token(user, token):
+    """Verify if the provided token is valid for the user"""
+    expected_token = _generate_verification_token(user)
+    return token == expected_token
+
+def send_order_confirmation_email(order, user):
+    """Send order confirmation email to the user"""
+    try:
+        # Get order items with calculated subtotals
+        order_items = []
+        for item in order.items.select_related('product').all():
+            order_items.append({
+                'product': item.product,
+                'quantity': item.quantity,
+                'unit_price': item.unit_price,
+                'subtotal': item.unit_price * item.quantity,
+            })
+        
+        # Prepare context for email template
+        context = {
+            'order': order,
+            'user': user,
+            'order_items': order_items,
+            'restaurant': order.restaurant,
+            'delivery': order.delivery if hasattr(order, 'delivery') else None,
+        }
+        
+        # Render HTML email template
+        html_message = render_to_string('email/order_confirmation.html', context)
+        
+        # Create plain text version
+        plain_message = f"""
+Hola {user.get_full_name() or user.username},
+
+Gracias por tu pedido en RAPPITESO.
+
+Detalles del pedido:
+Número de pedido: #{order.id}
+Restaurante: {order.restaurant.name}
+Fecha: {order.creation_date.strftime('%d/%m/%Y %H:%M')}
+Estado: {order.get_status_display()}
+
+Productos:
+"""
+        for item in order_items:
+            plain_message += f"- {item['product'].name} x{item['quantity']} - ${item['subtotal']:.2f}\n"
+        
+        plain_message += f"""
+Total: ${order.total:.2f}
+
+Dirección de entrega: {order.delivery_address}
+Método de pago: {order.get_payment_method_display()}
+"""
+        if order.comments:
+            plain_message += f"Comentarios: {order.comments}\n"
+        
+        if context['delivery']:
+            plain_message += f"\nConductor asignado: {context['delivery'].driver.name}\n"
+        
+        plain_message += """
+Gracias por elegir RAPPITESO!
+
+El equipo de RAPPITESO
+        """
+        
+        # Send email
+        subject = f'Confirmación de Pedido #{order.id} - RAPPITESO'
+        email = EmailMultiAlternatives(
+            subject=subject,
+            body=plain_message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=[user.email],
+        )
+        email.attach_alternative(html_message, "text/html")
+        email.send()
+        
+        return True
+    except Exception as e:
+        # Log the error but don't break the order creation process
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f'Error sending order confirmation email: {str(e)}')
+        return False
+
 def registro(request):
     if request.user.is_authenticated:
         return redirect('perfil')
@@ -41,9 +139,56 @@ def registro(request):
         form = RegistroForm(request.POST)
         if form.is_valid():
             user = form.save()
-            user.is_active = True  # Changed to True so users can login immediately
+            # Set user as inactive until email is verified
+            user.is_active = False
             user.save()
-            messages.success(request, '¡Cuenta creada exitosamente! Ahora puedes iniciar sesión.')
+            
+            # Generate verification token
+            verification_token = _generate_verification_token(user)
+            
+            # Create verification link
+            verification_url = request.build_absolute_uri(
+                f'/activate/{user.id}/{verification_token}/'
+            )
+            
+            # Send verification email
+            try:
+                send_mail(
+                    subject='Verifica tu cuenta en RAPPITESO',
+                    message=f'''
+Hola {user.get_full_name() or user.username},
+
+Gracias por registrarte en RAPPITESO.
+
+Por favor, verifica tu cuenta haciendo clic en el siguiente enlace:
+{verification_url}
+
+Si no creaste esta cuenta, puedes ignorar este mensaje.
+
+Saludos,
+El equipo de RAPPITESO
+                    ''',
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[user.email],
+                    fail_silently=False,
+                )
+                messages.success(
+                    request, 
+                    '¡Cuenta creada exitosamente! Por favor revisa tu correo electrónico para verificar tu cuenta antes de iniciar sesión.'
+                )
+            except Exception as e:
+                # If email fails, still create the account but warn the user
+                messages.warning(
+                    request,
+                    f'Cuenta creada, pero hubo un problema al enviar el email de verificación: {str(e)}. '
+                    'Por favor contacta al administrador.'
+                )
+                # In development, you might want to activate the user anyway
+                if settings.DEBUG:
+                    user.is_active = True
+                    user.save()
+                    messages.info(request, 'En modo DEBUG: cuenta activada automáticamente.')
+            
             return redirect('login')
     else:
         form = RegistroForm()
@@ -224,10 +369,21 @@ class DeliveryViewSet(viewsets.ModelViewSet):
     ordering_fields = ['delivery_date', 'delivery_time', 'delivery_status']
     ordering = ['-delivery_date']
 
-def activate_account(request, user_id):
+def activate_account(request, user_id, token):
     user = get_object_or_404(User, pk=user_id)
-    user.is_active = True
-    user.save()
+    
+    # Verify the token
+    if not _verify_token(user, token):
+        messages.error(request, 'El enlace de verificación no es válido o ha expirado.')
+        return redirect('login')
+    
+    # Activate the user if not already active
+    if not user.is_active:
+        user.is_active = True
+        user.save()
+        messages.success(request, '¡Tu cuenta ha sido verificada exitosamente! Ahora puedes iniciar sesión.')
+    else:
+        messages.info(request, 'Tu cuenta ya está verificada.')
     return redirect('login')
 
 def _get_cart(request):
@@ -410,7 +566,18 @@ def checkout(request):
                     delivery_status='pending',
                 )
                 
+                # Send order confirmation email
+                if user.email:
+                    email_sent = send_order_confirmation_email(order, user)
+                    if not email_sent:
+                        # Log warning but don't break the flow
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.warning(f'Could not send order confirmation email for order #{order.id}')
+                
                 messages.success(request, f'Pedido #{order.id} creado exitosamente. Conductor asignado: {driver.name}.')
+                if user.email:
+                    messages.info(request, 'Se ha enviado un correo de confirmación a tu email.')
                 
                 # Clear cart
                 request.session['cart'] = {}
